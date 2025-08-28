@@ -1,2 +1,1 @@
-print
-hello git test2
+print("hello injun")
