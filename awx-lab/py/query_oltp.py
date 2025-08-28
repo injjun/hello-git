@@ -1,64 +1,58 @@
-import os
-from dotenv import load_dotenv
-import pyodbc
+# query_dw.py
+import os, urllib.parse
+from dotenv import load_dotenv, find_dotenv
 import pandas as pd
 import matplotlib.pyplot as plt
+from sqlalchemy import create_engine
 
-# 환경변수 로드
-load_dotenv()
+# 1) .env 로드
+load_dotenv(find_dotenv(), override=True)
 
-SERVER = os.getenv("SQL_SERVER", "localhost")
-PORT = os.getenv("SQL_PORT", "1433")
-DB = os.getenv("SQL_DB_OLTP", "AdventureWorks2022")
-AUTH = os.getenv("SQL_AUTH", "windows").lower()
-USER = os.getenv("SQL_USERNAME")
-PWD = os.getenv("SQL_PASSWORD")
+SERVER = os.getenv("SQL_SERVER", r"localhost\SQLEXPRESS")
+PORT   = os.getenv("SQL_PORT", "1433")
+DB     = os.getenv("SQL_DB_DW", "AdventureWorksDW2022")
+USER   = os.getenv("SQL_USERNAME")          # 예: sa 또는 appuser
+PWD    = os.getenv("SQL_PASSWORD")
 
-# ODBC 연결 설정 (현재 환경은 ODBC Driver 17)
-if AUTH == "windows":
-    conn_str = (
-        f"Driver={{ODBC Driver 17 for SQL Server}};"
-        f"Server={SERVER},{PORT};Database={DB};"
-        f"Trusted_Connection=yes;Encrypt=yes;TrustServerCertificate=yes;"
-    )
-else:
-    conn_str = (
-        f"Driver={{ODBC Driver 17 for SQL Server}};"
-        f"Server={SERVER},{PORT};Database={DB};"
-        f"Uid={USER};Pwd={PWD};Encrypt=yes;TrustServerCertificate=yes;"
-    )
-
-# SQL 쿼리
-sql = """
-WITH SalesCTE AS (
-    SELECT
-        YEAR(soh.OrderDate) AS [Year],
-        MONTH(soh.OrderDate) AS [Month],
-        SUM(sod.OrderQty * sod.UnitPrice * (1 - sod.UnitPriceDiscount)) AS SalesAmount
-    FROM Sales.SalesOrderHeader AS soh
-    JOIN Sales.SalesOrderDetail AS sod
-        ON soh.SalesOrderID = sod.SalesOrderID
-    GROUP BY YEAR(soh.OrderDate), MONTH(soh.OrderDate)
+# 2) ODBC 연결 문자열 (SQL 로그인 사용)
+odbc = (
+    f"DRIVER={{ODBC Driver 17 for SQL Server}};"
+    f"SERVER={SERVER},{PORT};DATABASE={DB};"
+    f"UID={USER};PWD={PWD};"
+    f"Encrypt=yes;TrustServerCertificate=yes;"
 )
-SELECT [Year], [Month], CAST(SalesAmount AS DECIMAL(18,2)) AS SalesAmount
-FROM SalesCTE
+params = urllib.parse.quote_plus(odbc)
+engine = create_engine(f"mssql+pyodbc:///?odbc_connect={params}")
+
+# 3) 쿼리
+sql = """
+SELECT
+    d.CalendarYear AS [Year],
+    d.MonthNumberOfYear AS [Month],
+    SUM(f.SalesAmount) AS SalesAmount
+FROM dbo.FactInternetSales AS f
+JOIN dbo.DimDate AS d ON f.OrderDateKey = d.DateKey
+GROUP BY d.CalendarYear, d.MonthNumberOfYear
 ORDER BY [Year], [Month];
 """
 
-# DB 연결 및 데이터 조회
-with pyodbc.connect(conn_str) as conn:
-    df = pd.read_sql(sql, conn)
+# 4) 실행 & 시각화
+with engine.begin() as conn:
+    who = pd.read_sql_query(
+        "SELECT @@SERVERNAME AS ServerName, SUSER_SNAME() AS LoginName;", conn
+    )
+    print(who)
+    df = pd.read_sql_query(sql, conn)
 
-# 시각화
 plt.figure(figsize=(9, 4))
-df['YM'] = df['Year'].astype(str) + '-' + df['Month'].astype(str).str.zfill(2)
-plt.plot(df['YM'], df['SalesAmount'], marker='o')
+df["YM"] = df["Year"].astype(str) + "-" + df["Month"].astype(str).str.zfill(2)
+plt.bar(df["YM"], df["SalesAmount"])
 plt.xticks(rotation=60)
-plt.title('AdventureWorks OLTP: Monthly Sales')
-plt.xlabel('Year-Month')
-plt.ylabel('Sales Amount')
+plt.title("AdventureWorks DW: Monthly Internet Sales")
+plt.xlabel("Year-Month")
+plt.ylabel("Sales Amount")
 plt.tight_layout()
-plt.savefig('oltp_monthly_sales.png', dpi=150)
+plt.savefig("dw_monthly_sales.png", dpi=150)
 plt.show()
 
-df.to_csv('oltp_sales.csv', index=False, encoding='utf-8-sig')
+df.to_csv("dw_sales.csv", index=False, encoding="utf-8-sig")
